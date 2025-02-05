@@ -1,7 +1,77 @@
 use bytemuck::NoUninit;
+use core::fmt;
 use generic_array::{ArrayLength, GenericArray};
-use std::marker::PhantomData;
+use std::collections::HashSet;
+use std::hash::Hash;
+use std::{any::TypeId, marker::PhantomData, sync::Arc};
 use wgpu::util::DeviceExt;
+
+struct Library {
+    operations: HashSet<Box<dyn Operation>>,
+}
+
+/// An [`Operation`] is an abstract function which can apply to an arbitrary number of parameters of varying type.
+///
+/// The [`Operation`] is not itself a unique kernel, but instead is used to generate a kernel based on
+trait Operation {
+    /// Returns the unique name of the operation.
+    fn name(&self) -> &str;
+
+    /// Returns a kernel specialized to the input types and dimensions, if possible.
+    ///
+    /// Returns `None` if this specialization is not allowed.
+    fn kernel(&self, params: &ParamSpec) -> Option<Arc<dyn Kernel>>;
+}
+
+impl Hash for dyn Operation {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name().hash(state);
+    }
+}
+
+/// A [`Kernel`] is a concrete shader implementation with a specific entry point name.
+///
+/// The [`fmt::Display`] trait is used to write the kernel to a stream or convert it to a string.
+trait Kernel: fmt::Display {
+    /// Returns the unique name of the kernel operation entry point.
+    fn name(&self) -> &str;
+
+    /// Returns a list of dependencies required by this kernel.
+    fn dependencies(&self) -> Vec<CallSpec>;
+}
+
+/// A specific specialization of an operation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CallSpec {
+    /// The name of the operation being called.
+    operation: String,
+    /// The parameter spec for the operation call.
+    params: ParamSpec,
+}
+
+/// A specific set of parameters.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ParamSpec {
+    accumulators: Vec<TensorSpec>,
+    inputs: Vec<TensorSpec>,
+    outputs: Vec<TensorSpec>,
+}
+
+/// A specific type and dimension count required for kernel specialization.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TensorSpec {
+    dims: u32,
+    ty: TypeId,
+}
+
+/// [`TensorDynamic`] works the same as [`TensorDense`], but type parameters are erased.
+///
+/// Internally this remembers the concrete type using [`TypeId`].
+pub struct TensorDynamic {
+    buffer: wgpu::Buffer,
+    dims: Vec<u32>,
+    ty: TypeId,
+}
 
 /// [`TensorAbstract`] represents a node in a computation DAG.
 ///
@@ -58,20 +128,10 @@ where
     }
 }
 
-trait ShaderNumber {
-    fn wgsl_name() -> &'static str;
-}
-
-impl ShaderNumber for i32 {
-    fn wgsl_name() -> &'static str {
-        "i32"
-    }
-}
-
-impl ShaderNumber for f32 {
-    fn wgsl_name() -> &'static str {
-        "f32"
-    }
+pub enum Primitive {
+    I32,
+    U32,
+    F32,
 }
 
 pub struct TensorSparse {
